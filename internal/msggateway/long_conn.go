@@ -15,6 +15,7 @@
 package msggateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/OpenIMSDK/protocol/constant"
@@ -49,19 +50,22 @@ type LongConn interface {
 	SetReadLimit(limit int64)
 	SetPongHandler(handler PingPongHandler)
 	SetPingHandler(handler PingPongHandler)
-	// doUpgrade Check the connection of the current and when it was sent are the same
-	//doUpgrade(w http.ResponseWriter, r *http.Request) error
 }
 
 type GWebSocket struct {
 	handshakeTimeout time.Duration
 	writeBufferSize  int
 	cache            cache.MsgModel
-	newClient        func(ctx *UserConnContext)
+	clientAgent      ConnClientAgent
 }
 
-func newGWebSocket(handshakeTimeout time.Duration, wbs int) *GWebSocket {
-	return &GWebSocket{handshakeTimeout: handshakeTimeout, writeBufferSize: wbs}
+func newWsHandler(handshakeTimeout time.Duration, wbs int, cache cache.MsgModel, connAgent ConnClientAgent) *GWebSocket {
+	return &GWebSocket{
+		handshakeTimeout: handshakeTimeout,
+		writeBufferSize:  wbs,
+		cache:            cache,
+		clientAgent:      connAgent,
+	}
 }
 
 func (d *GWebSocket) doUpgrade(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
@@ -76,16 +80,17 @@ func (d *GWebSocket) doUpgrade(w http.ResponseWriter, r *http.Request) (*websock
 	return upgrader.Upgrade(w, r, nil)
 }
 
-func (d *GWebSocket) wsHandler(w http.ResponseWriter, r *http.Request) {
+func (d *GWebSocket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	args, pErr := d.ParseWSArgs(r)
 	if pErr != nil {
+		httpError(w, pErr)
 		return
 	}
 
 	connContext := newContext(args.UserID, r.RemoteAddr)
 	conn, err := d.doUpgrade(w, r)
 	if err != nil {
-		httpError(connContext, err)
+		httpError(w, err)
 		return
 	}
 
@@ -99,30 +104,21 @@ func (d *GWebSocket) wsHandler(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close()
 			return
 		}
-	} else {
-		if pErr != nil {
-			httpError(connContext, pErr)
-			return
-		}
-		//wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
-		//if err := wsLongConn.doUpgrade(w, r); err != nil {
-		//	httpError(connContext, err)
-		//	return
-		//}
 	}
-
+	d.clientAgent.CreateNewConnClient(connContext, &WsConn{conn: conn})
 }
 
 func (d *GWebSocket) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
+	if d.clientAgent.OverConnLimit() {
+		return nil, errs.ErrConnOverMaxNumLimit.Wrap("over max conn num limit")
+	}
+
 	var v WSArgs
 	defer func() {
 		args = &v
 	}()
 	query := r.URL.Query()
 	v.MsgResp, _ = strconv.ParseBool(query.Get(MsgResp))
-	//if ws.onlineUserConnNum.Load() >= ws.maxConnNum {
-	//	return nil, errs.ErrConnOverMaxNumLimit.Wrap("over max conn num limit")
-	//}
 	if v.Token = query.Get(Token); v.Token == "" {
 		return nil, errs.ErrConnArgsErr.Wrap("token is empty")
 	}
@@ -147,7 +143,7 @@ func (d *GWebSocket) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
 	if r.Header.Get(Compression) == GzipCompressionProtocol {
 		v.Compression = true
 	}
-	m, err := ws.cache.GetTokensWithoutError(context.Background(), v.UserID, platformID)
+	m, err := d.cache.GetTokensWithoutError(context.Background(), v.UserID, platformID)
 	if err != nil {
 		return nil, err
 	}

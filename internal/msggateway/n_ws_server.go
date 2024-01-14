@@ -67,6 +67,12 @@ var bufferPool = sync.Pool{
 	},
 }
 
+type ConnClientAgent interface {
+	CreateNewConnClient(ctx *UserConnContext, conn LongConn)
+	GetConnNum() int64
+	OverConnLimit() bool
+}
+
 type WsServer struct {
 	port              int
 	tcpPort           int
@@ -88,6 +94,22 @@ type WsServer struct {
 	Encoder
 	MessageHandler
 }
+
+func (ws *WsServer) CreateNewConnClient(ctx *UserConnContext, conn LongConn) {
+	client := ws.clientPool.Get().(*Client)
+	client.ResetClient(ctx, conn, ws)
+	ws.registerChan <- client
+	go client.readMessage()
+}
+
+func (ws *WsServer) GetConnNum() int64 {
+	return ws.onlineUserConnNum.Load()
+}
+
+func (ws *WsServer) OverConnLimit() bool {
+	return ws.onlineUserConnNum.Load() >= ws.maxConnNum
+}
+
 type kickHandler struct {
 	clientOK   bool
 	oldClients []*Client
@@ -194,15 +216,17 @@ func (ws *WsServer) Run() error {
 
 	var server *http.Server
 	if ws.port != 0 {
-		server = &http.Server{Addr: ":" + utils.IntToString(ws.port), Handler: nil}
+		handler := newWsHandler(ws.handshakeTimeout, ws.writeBufferSize, ws.cache, ws)
+		server = &http.Server{Addr: ":" + utils.IntToString(ws.port), Handler: handler}
 		wg.Go(func() error {
-			http.HandleFunc("/", ws.wsHandler)
 			return server.ListenAndServe()
 		})
 	}
 
+	var tcpServer *TcpServer
 	if ws.tcpPort != 0 {
-
+		tcpServer = NewTCPServer(fmt.Sprintf("0.0.0.0:%d", ws.tcpPort), ws)
+		wg.Go(tcpServer.Run)
 	}
 
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -214,6 +238,10 @@ func (ws *WsServer) Run() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			_ = server.Shutdown(ctx)
+		}
+
+		if tcpServer != nil {
+			_ = tcpServer.Close()
 		}
 
 		_ = wg.Wait()
@@ -478,49 +506,4 @@ func (ws *WsServer) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
 		return nil, errs.ErrTokenNotExist.Wrap()
 	}
 	return &v, nil
-}
-
-//
-//func (ws *WsServer) wsHandler(w http.ResponseWriter, r *http.Request) {
-//	args, pErr := ws.ParseWSArgs(r)
-//	connContext := newContext(args.UserID, r.RemoteAddr)
-//	var wsLongConn *GWebSocket
-//	if args.MsgResp {
-//		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
-//		if err := wsLongConn.doUpgrade(w, r); err != nil {
-//			httpError(connContext, err)
-//			return
-//		}
-//		data, err := json.Marshal(apiresp.ParseError(pErr))
-//		if err != nil {
-//			_ = wsLongConn.Close()
-//			return
-//		}
-//		if err := wsLongConn.WriteMessage(MessageText, data); err != nil {
-//			_ = wsLongConn.Close()
-//			return
-//		}
-//		if pErr != nil {
-//			_ = wsLongConn.Close()
-//			return
-//		}
-//	} else {
-//		if pErr != nil {
-//			httpError(connContext, pErr)
-//			return
-//		}
-//		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
-//		if err := wsLongConn.doUpgrade(w, r); err != nil {
-//			httpError(connContext, err)
-//			return
-//		}
-//	}
-//
-//}
-
-func (ws *WsServer) newClient(connContext *UserConnContext, conn LongConn) {
-	client := ws.clientPool.Get().(*Client)
-	client.ResetClient(connContext, conn, ws)
-	ws.registerChan <- client
-	go client.readMessage()
 }
