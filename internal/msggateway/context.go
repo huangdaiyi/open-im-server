@@ -15,8 +15,6 @@
 package msggateway
 
 import (
-	"net/http"
-	"net/url"
 	"strconv"
 	"time"
 
@@ -25,12 +23,16 @@ import (
 )
 
 type UserConnContext struct {
-	RespWriter http.ResponseWriter
-	Req        *http.Request
-	Path       string
-	Method     string
-	RemoteAddr string
-	ConnID     string
+	//RespWriter http.ResponseWriter
+	//Req        *http.Request
+	platformID   string
+	operationID  string
+	userID       string
+	token        string
+	RemoteAddr   string
+	ConnID       string
+	isBackground bool
+	isCompress   bool
 }
 
 func (c *UserConnContext) Deadline() (deadline time.Time, ok bool) {
@@ -62,20 +64,21 @@ func (c *UserConnContext) Value(key any) any {
 	}
 }
 
-func newContext(respWriter http.ResponseWriter, req *http.Request) *UserConnContext {
+func newContext(remoteAddr string, userID string) *UserConnContext {
 	return &UserConnContext{
-		RespWriter: respWriter,
-		Req:        req,
-		Path:       req.URL.Path,
-		Method:     req.Method,
-		RemoteAddr: req.RemoteAddr,
-		ConnID:     utils.Md5(req.RemoteAddr + "_" + strconv.Itoa(int(utils.GetCurrentTimestampByMill()))),
+		//RespWriter: respWriter,
+		//Req:        req,
+		//Path:       req.URL.Path,
+		//Method:     req.Method,
+		userID:     userID,
+		RemoteAddr: remoteAddr,
+		ConnID:     utils.Md5(remoteAddr + "_" + strconv.Itoa(int(utils.GetCurrentTimestampByMill()))),
 	}
 }
 
 func newTempContext() *UserConnContext {
 	return &UserConnContext{
-		Req: &http.Request{URL: &url.URL{}},
+		//Req: &http.Request{URL: &url.URL{}},
 	}
 }
 
@@ -83,65 +86,49 @@ func (c *UserConnContext) GetRemoteAddr() string {
 	return c.RemoteAddr
 }
 
-func (c *UserConnContext) Query(key string) (string, bool) {
-	var value string
-	if value = c.Req.URL.Query().Get(key); value == "" {
-		return value, false
-	}
-	return value, true
-}
-
-func (c *UserConnContext) GetHeader(key string) (string, bool) {
-	var value string
-	if value = c.Req.Header.Get(key); value == "" {
-		return value, false
-	}
-	return value, true
-}
-
-func (c *UserConnContext) SetHeader(key, value string) {
-	c.RespWriter.Header().Set(key, value)
-}
-
-func (c *UserConnContext) ErrReturn(error string, code int) {
-	http.Error(c.RespWriter, error, code)
-}
-
 func (c *UserConnContext) GetConnID() string {
 	return c.ConnID
 }
 
 func (c *UserConnContext) GetUserID() string {
-	return c.Req.URL.Query().Get(WsUserID)
+	//return c.Req.URL.Query().Get(WsUserID)
+	return c.userID
 }
 
 func (c *UserConnContext) GetPlatformID() string {
-	return c.Req.URL.Query().Get(PlatformID)
+	//return c.Req.URL.Query().Get(PlatformID)
+	return c.platformID
 }
 
 func (c *UserConnContext) GetOperationID() string {
-	return c.Req.URL.Query().Get(OperationID)
+	//return c.Req.URL.Query().Get(OperationID)
+	return c.operationID
 }
 
 func (c *UserConnContext) SetOperationID(operationID string) {
-	values := c.Req.URL.Query()
-	values.Set(OperationID, operationID)
-	c.Req.URL.RawQuery = values.Encode()
+	//values := c.Req.URL.Query()
+	//values.Set(OperationID, operationID)
+	//c.Req.URL.RawQuery = values.Encode()
+	c.operationID = operationID
 }
 
 func (c *UserConnContext) GetToken() string {
-	return c.Req.URL.Query().Get(Token)
+	//return c.Req.URL.Query().Get(Token)
+	return c.token
 }
 
 func (c *UserConnContext) SetToken(token string) {
-	c.Req.URL.RawQuery = Token + "=" + token
+	//c.Req.URL.RawQuery = Token + "=" + token
+	c.token = token
 }
 
 func (c *UserConnContext) GetBackground() bool {
-	b, err := strconv.ParseBool(c.Req.URL.Query().Get(BackgroundStatus))
-	if err != nil {
-		return false
-	} else {
-		return b
-	}
+	//b, err := strconv.ParseBool(c.Req.URL.Query().Get(BackgroundStatus))
+	//if err != nil {
+	//	return false
+	//} else {
+	//	return b
+	//}
+
+	return c.isBackground
 }

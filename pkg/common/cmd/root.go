@@ -55,6 +55,7 @@ func WithLogName(logName string) func(*CmdOpts) {
 	}
 }
 
+// NewRootCmd  初始化配置和logger.
 func NewRootCmd(name string, opts ...func(*CmdOpts)) *RootCmd {
 	rootCmd := &RootCmd{Name: name}
 	cmd := cobra.Command{

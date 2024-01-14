@@ -15,7 +15,15 @@
 package msggateway
 
 import (
+	"encoding/json"
+	"fmt"
+	"github.com/OpenIMSDK/protocol/constant"
+	"github.com/OpenIMSDK/tools/apiresp"
+	"github.com/OpenIMSDK/tools/errs"
+	"github.com/openimsdk/open-im-server/v3/pkg/authverify"
+	"github.com/openimsdk/open-im-server/v3/pkg/common/db/cache"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -33,8 +41,6 @@ type LongConn interface {
 	SetReadDeadline(timeout time.Duration) error
 	// SetWriteDeadline sets to write deadline when send message,when read has timed out,will return error.
 	SetWriteDeadline(timeout time.Duration) error
-	// Dial Try to dial a connection,url must set auth args,header can control compress data
-	Dial(urlStr string, requestHeader http.Header) (*http.Response, error)
 	// IsNil Whether the connection of the current long connection is nil
 	IsNil() bool
 	// SetConnNil Set the connection of the current long connection to nil
@@ -43,25 +49,22 @@ type LongConn interface {
 	SetReadLimit(limit int64)
 	SetPongHandler(handler PingPongHandler)
 	SetPingHandler(handler PingPongHandler)
-	// GenerateLongConn Check the connection of the current and when it was sent are the same
-	GenerateLongConn(w http.ResponseWriter, r *http.Request) error
+	// doUpgrade Check the connection of the current and when it was sent are the same
+	//doUpgrade(w http.ResponseWriter, r *http.Request) error
 }
+
 type GWebSocket struct {
-	protocolType     int
-	conn             *websocket.Conn
 	handshakeTimeout time.Duration
 	writeBufferSize  int
+	cache            cache.MsgModel
+	newClient        func(ctx *UserConnContext)
 }
 
-func newGWebSocket(protocolType int, handshakeTimeout time.Duration, wbs int) *GWebSocket {
-	return &GWebSocket{protocolType: protocolType, handshakeTimeout: handshakeTimeout, writeBufferSize: wbs}
+func newGWebSocket(handshakeTimeout time.Duration, wbs int) *GWebSocket {
+	return &GWebSocket{handshakeTimeout: handshakeTimeout, writeBufferSize: wbs}
 }
 
-func (d *GWebSocket) Close() error {
-	return d.conn.Close()
-}
-
-func (d *GWebSocket) GenerateLongConn(w http.ResponseWriter, r *http.Request) error {
+func (d *GWebSocket) doUpgrade(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
 	upgrader := &websocket.Upgrader{
 		HandshakeTimeout: d.handshakeTimeout,
 		CheckOrigin:      func(r *http.Request) bool { return true },
@@ -70,66 +73,147 @@ func (d *GWebSocket) GenerateLongConn(w http.ResponseWriter, r *http.Request) er
 		upgrader.WriteBufferSize = d.writeBufferSize
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	return upgrader.Upgrade(w, r, nil)
+}
+
+func (d *GWebSocket) wsHandler(w http.ResponseWriter, r *http.Request) {
+	args, pErr := d.ParseWSArgs(r)
+	if pErr != nil {
+		return
+	}
+
+	connContext := newContext(args.UserID, r.RemoteAddr)
+	conn, err := d.doUpgrade(w, r)
 	if err != nil {
-		return err
+		httpError(connContext, err)
+		return
 	}
-	d.conn = conn
-	return nil
-}
 
-func (d *GWebSocket) WriteMessage(messageType int, message []byte) error {
-	// d.setSendConn(d.conn)
-	return d.conn.WriteMessage(messageType, message)
-}
-
-//func (d *GWebSocket) setSendConn(sendConn *websocket.Conn) {
-//	d.sendConn = sendConn
-//}
-
-func (d *GWebSocket) ReadMessage() (int, []byte, error) {
-	return d.conn.ReadMessage()
-}
-
-func (d *GWebSocket) SetReadDeadline(timeout time.Duration) error {
-	return d.conn.SetReadDeadline(time.Now().Add(timeout))
-}
-
-func (d *GWebSocket) SetWriteDeadline(timeout time.Duration) error {
-	return d.conn.SetWriteDeadline(time.Now().Add(timeout))
-}
-
-func (d *GWebSocket) Dial(urlStr string, requestHeader http.Header) (*http.Response, error) {
-	conn, httpResp, err := websocket.DefaultDialer.Dial(urlStr, requestHeader)
-	if err == nil {
-		d.conn = conn
+	if args.MsgResp {
+		data, err := json.Marshal(apiresp.ParseError(pErr))
+		if err != nil {
+			_ = conn.Close()
+			return
+		}
+		if err := conn.WriteMessage(MessageText, data); err != nil {
+			_ = conn.Close()
+			return
+		}
+	} else {
+		if pErr != nil {
+			httpError(connContext, pErr)
+			return
+		}
+		//wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
+		//if err := wsLongConn.doUpgrade(w, r); err != nil {
+		//	httpError(connContext, err)
+		//	return
+		//}
 	}
-	return httpResp, err
+
 }
 
-func (d *GWebSocket) IsNil() bool {
-	if d.conn != nil {
-		return false
+func (d *GWebSocket) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
+	var v WSArgs
+	defer func() {
+		args = &v
+	}()
+	query := r.URL.Query()
+	v.MsgResp, _ = strconv.ParseBool(query.Get(MsgResp))
+	//if ws.onlineUserConnNum.Load() >= ws.maxConnNum {
+	//	return nil, errs.ErrConnOverMaxNumLimit.Wrap("over max conn num limit")
+	//}
+	if v.Token = query.Get(Token); v.Token == "" {
+		return nil, errs.ErrConnArgsErr.Wrap("token is empty")
 	}
-	return true
+	if v.UserID = query.Get(WsUserID); v.UserID == "" {
+		return nil, errs.ErrConnArgsErr.Wrap("sendID is empty")
+	}
+	platformIDStr := query.Get(PlatformID)
+	if platformIDStr == "" {
+		return nil, errs.ErrConnArgsErr.Wrap("platformID is empty")
+	}
+	platformID, err := strconv.Atoi(platformIDStr)
+	if err != nil {
+		return nil, errs.ErrConnArgsErr.Wrap("platformID is not int")
+	}
+	v.PlatformID = platformID
+	if err = authverify.WsVerifyToken(v.Token, v.UserID, platformID); err != nil {
+		return nil, err
+	}
+	if query.Get(Compression) == GzipCompressionProtocol {
+		v.Compression = true
+	}
+	if r.Header.Get(Compression) == GzipCompressionProtocol {
+		v.Compression = true
+	}
+	m, err := ws.cache.GetTokensWithoutError(context.Background(), v.UserID, platformID)
+	if err != nil {
+		return nil, err
+	}
+	if v, ok := m[v.Token]; ok {
+		switch v {
+		case constant.NormalToken:
+		case constant.KickedToken:
+			return nil, errs.ErrTokenKicked.Wrap()
+		default:
+			return nil, errs.ErrTokenUnknown.Wrap(fmt.Sprintf("token status is %d", v))
+		}
+	} else {
+		return nil, errs.ErrTokenNotExist.Wrap()
+	}
+	return &v, nil
 }
 
-func (d *GWebSocket) SetConnNil() {
-	d.conn = nil
+type WSArgs struct {
+	Token       string
+	UserID      string
+	PlatformID  int
+	Compression bool
+	MsgResp     bool
 }
 
-func (d *GWebSocket) SetReadLimit(limit int64) {
-	d.conn.SetReadLimit(limit)
+// WsConn websocket 连接。
+type WsConn struct {
+	conn *websocket.Conn
 }
 
-func (d *GWebSocket) SetPongHandler(handler PingPongHandler) {
-	d.conn.SetPongHandler(handler)
+func (w *WsConn) Close() error {
+	return w.conn.Close()
 }
 
-func (d *GWebSocket) SetPingHandler(handler PingPongHandler) {
-	d.conn.SetPingHandler(handler)
+func (w *WsConn) WriteMessage(messageType int, message []byte) error {
+	return w.conn.WriteMessage(messageType, message)
 }
 
-//func (d *GWebSocket) CheckSendConnDiffNow() bool {
-//	return d.conn == d.sendConn
-//}
+func (w *WsConn) ReadMessage() (int, []byte, error) {
+	return w.conn.ReadMessage()
+}
+
+func (w *WsConn) SetReadDeadline(timeout time.Duration) error {
+	return w.conn.SetReadDeadline(time.Now().Add(timeout))
+}
+
+func (w *WsConn) SetWriteDeadline(timeout time.Duration) error {
+	return w.conn.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+func (w *WsConn) IsNil() bool {
+	return w.conn == nil
+}
+
+func (w *WsConn) SetConnNil() {
+	w.conn = nil
+}
+
+func (w *WsConn) SetReadLimit(limit int64) {
+	w.conn.SetReadLimit(limit)
+}
+
+func (w *WsConn) SetPongHandler(handler PingPongHandler) {
+	w.conn.SetPongHandler(handler)
+}
+
+func (w *WsConn) SetPingHandler(handler PingPongHandler) {
+	w.conn.SetPingHandler(handler)
+}

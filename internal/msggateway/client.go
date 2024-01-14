@@ -91,22 +91,19 @@ func newClient(ctx *UserConnContext, conn LongConn, isCompress bool) *Client {
 func (c *Client) ResetClient(
 	ctx *UserConnContext,
 	conn LongConn,
-	isBackground, isCompress bool,
 	longConnServer LongConnServer,
-	token string,
 ) {
 	c.w = new(sync.Mutex)
 	c.conn = conn
 	c.PlatformID = utils.StringToInt(ctx.GetPlatformID())
-	c.IsCompress = isCompress
-	c.IsBackground = isBackground
+	c.IsCompress = ctx.isCompress
 	c.UserID = ctx.GetUserID()
 	c.ctx = ctx
 	c.longConnServer = longConnServer
 	c.IsBackground = false
 	c.closed.Store(false)
 	c.closedErr = nil
-	c.token = token
+	c.token = ctx.token
 }
 
 // pingHandler handles ping messages and sends pong responses.

@@ -74,6 +74,7 @@ func run(port int, proPort int) error {
 		return err
 	}
 
+	// zookeeper 注册服务节点信息根目录信息
 	if err = client.CreateRpcRootNodes(config.Config.GetServiceNames()); err != nil {
 		log.ZError(context.Background(), "Failed to create RPC root nodes", err)
 		return err

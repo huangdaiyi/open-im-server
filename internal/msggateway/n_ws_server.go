@@ -16,10 +16,8 @@ package msggateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/OpenIMSDK/tools/apiresp"
 	"net/http"
 	"os"
 	"os/signal"
@@ -49,7 +47,7 @@ import (
 
 type LongConnServer interface {
 	Run() error
-	wsHandler(w http.ResponseWriter, r *http.Request)
+	//wsHandler(w http.ResponseWriter, r *http.Request)
 	GetUserAllCons(userID string) ([]*Client, bool)
 	GetUserPlatformCons(userID string, platform int) ([]*Client, bool, bool)
 	Validate(s any) error
@@ -71,7 +69,8 @@ var bufferPool = sync.Pool{
 
 type WsServer struct {
 	port              int
-	wsMaxConnNum      int64
+	tcpPort           int
+	maxConnNum        int64
 	registerChan      chan *Client
 	unregisterChan    chan *Client
 	kickHandlerChan   chan *kickHandler
@@ -143,16 +142,16 @@ func (ws *WsServer) GetUserPlatformCons(userID string, platform int) ([]*Client,
 }
 
 func NewWsServer(opts ...Option) (*WsServer, error) {
-	var config configs
+	var cfg configs
 	for _, o := range opts {
-		o(&config)
+		o(&cfg)
 	}
 	v := validator.New()
 	return &WsServer{
-		port:             config.port,
-		wsMaxConnNum:     config.maxConnNum,
-		writeBufferSize:  config.writeBufferSize,
-		handshakeTimeout: config.handshakeTimeout,
+		port:             cfg.port,
+		maxConnNum:       cfg.maxConnNum,
+		writeBufferSize:  cfg.writeBufferSize,
+		handshakeTimeout: cfg.handshakeTimeout,
 		clientPool: sync.Pool{
 			New: func() any {
 				return new(Client)
@@ -177,8 +176,6 @@ func (ws *WsServer) Run() error {
 		done = make(chan struct{}, 1)
 	)
 
-	server := http.Server{Addr: ":" + utils.IntToString(ws.port), Handler: nil}
-
 	wg.Go(func() error {
 		for {
 			select {
@@ -195,20 +192,30 @@ func (ws *WsServer) Run() error {
 		}
 	})
 
-	wg.Go(func() error {
-		http.HandleFunc("/", ws.wsHandler)
-		return server.ListenAndServe()
-	})
+	var server *http.Server
+	if ws.port != 0 {
+		server = &http.Server{Addr: ":" + utils.IntToString(ws.port), Handler: nil}
+		wg.Go(func() error {
+			http.HandleFunc("/", ws.wsHandler)
+			return server.ListenAndServe()
+		})
+	}
+
+	if ws.tcpPort != 0 {
+
+	}
 
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	<-sigs
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
 		// graceful exit operation for server
-		_ = server.Shutdown(ctx)
+		if server != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			_ = server.Shutdown(ctx)
+		}
+
 		_ = wg.Wait()
 		close(done)
 	}()
@@ -428,7 +435,7 @@ func (ws *WsServer) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
 	}()
 	query := r.URL.Query()
 	v.MsgResp, _ = strconv.ParseBool(query.Get(MsgResp))
-	if ws.onlineUserConnNum.Load() >= ws.wsMaxConnNum {
+	if ws.onlineUserConnNum.Load() >= ws.maxConnNum {
 		return nil, errs.ErrConnOverMaxNumLimit.Wrap("over max conn num limit")
 	}
 	if v.Token = query.Get(Token); v.Token == "" {
@@ -473,50 +480,47 @@ func (ws *WsServer) ParseWSArgs(r *http.Request) (args *WSArgs, err error) {
 	return &v, nil
 }
 
-type WSArgs struct {
-	Token       string
-	UserID      string
-	PlatformID  int
-	Compression bool
-	MsgResp     bool
-}
+//
+//func (ws *WsServer) wsHandler(w http.ResponseWriter, r *http.Request) {
+//	args, pErr := ws.ParseWSArgs(r)
+//	connContext := newContext(args.UserID, r.RemoteAddr)
+//	var wsLongConn *GWebSocket
+//	if args.MsgResp {
+//		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
+//		if err := wsLongConn.doUpgrade(w, r); err != nil {
+//			httpError(connContext, err)
+//			return
+//		}
+//		data, err := json.Marshal(apiresp.ParseError(pErr))
+//		if err != nil {
+//			_ = wsLongConn.Close()
+//			return
+//		}
+//		if err := wsLongConn.WriteMessage(MessageText, data); err != nil {
+//			_ = wsLongConn.Close()
+//			return
+//		}
+//		if pErr != nil {
+//			_ = wsLongConn.Close()
+//			return
+//		}
+//	} else {
+//		if pErr != nil {
+//			httpError(connContext, pErr)
+//			return
+//		}
+//		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
+//		if err := wsLongConn.doUpgrade(w, r); err != nil {
+//			httpError(connContext, err)
+//			return
+//		}
+//	}
+//
+//}
 
-func (ws *WsServer) wsHandler(w http.ResponseWriter, r *http.Request) {
-	connContext := newContext(w, r)
-	args, pErr := ws.ParseWSArgs(r)
-	var wsLongConn *GWebSocket
-	if args.MsgResp {
-		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
-		if err := wsLongConn.GenerateLongConn(w, r); err != nil {
-			httpError(connContext, err)
-			return
-		}
-		data, err := json.Marshal(apiresp.ParseError(pErr))
-		if err != nil {
-			_ = wsLongConn.Close()
-			return
-		}
-		if err := wsLongConn.WriteMessage(MessageText, data); err != nil {
-			_ = wsLongConn.Close()
-			return
-		}
-		if pErr != nil {
-			_ = wsLongConn.Close()
-			return
-		}
-	} else {
-		if pErr != nil {
-			httpError(connContext, pErr)
-			return
-		}
-		wsLongConn = newGWebSocket(WebSocket, ws.handshakeTimeout, ws.writeBufferSize)
-		if err := wsLongConn.GenerateLongConn(w, r); err != nil {
-			httpError(connContext, err)
-			return
-		}
-	}
+func (ws *WsServer) newClient(connContext *UserConnContext, conn LongConn) {
 	client := ws.clientPool.Get().(*Client)
-	client.ResetClient(connContext, wsLongConn, connContext.GetBackground(), args.Compression, ws, args.Token)
+	client.ResetClient(connContext, conn, ws)
 	ws.registerChan <- client
 	go client.readMessage()
 }
